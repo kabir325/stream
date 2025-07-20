@@ -11,6 +11,10 @@ st.set_page_config(
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+# Disable TensorFlow warnings and info logs
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+import warnings
+warnings.filterwarnings('ignore')
 
 # 3. Other imports
 import numpy as np
@@ -45,8 +49,13 @@ except ImportError:
     TRANSLATOR_AVAILABLE = False
     st.warning("Translation library not installed. Using English only. Install with: pip install googletrans-py")
 
-# Initialize translator
-translator = Translator() if TRANSLATOR_AVAILABLE else None
+# Initialize translator with caching
+@st.cache_resource
+def get_translator():
+    """Initialize and cache translator instance"""
+    return Translator() if TRANSLATOR_AVAILABLE else None
+
+translator = get_translator()
 
 # Supported languages
 SUPPORTED_LANGUAGES = {
@@ -63,7 +72,7 @@ UI_TRANSLATIONS = {
         "disease_detection": "🔍 Disease Detection",
         "crop_recommendation": "🌱 Crop Recommendation",
         "weather_dashboard": "🌦️ Weather Dashboard",
-        "ai_chatbot": "🤖 AI Chatbot",
+        "ai_chatbot": "💬 AI Chatbot",
         "welcome": "🌿 Welcome to AgriLens",
         "smart_assistant": "Your Smart Crop Assistant",
         "empowering_farmers": "Empowering farmers with AI-driven agricultural insights",
@@ -153,6 +162,7 @@ UI_TRANSLATIONS = {
 }
 
 # Function to translate text
+@st.cache_data(ttl=3600)  # Cache translations for 1 hour
 def translate_text(text, target_language="en"):
     """Translates text to the target language."""
     if not TRANSLATOR_AVAILABLE or target_language == "en":
@@ -277,6 +287,7 @@ def local_css(file_name):
 # Load custom CSS (assuming 'style.css' exists in the same directory)
 local_css("style.css")
 
+@st.cache_data(ttl=300)  # Cache for 5 minutes
 def get_current_weather(location):
     """Fetches current weather data for a given location."""
     url = f"http://api.openweathermap.org/data/2.5/weather?q={location}&appid={API_KEY}&units=metric"
@@ -310,6 +321,7 @@ def get_current_weather(location):
         st.error(f"An unexpected error occurred while fetching current weather data: {e}")
         return None
 
+@st.cache_data(ttl=300)  # Cache for 5 minutes
 def get_forecast_weather(location):
     """Fetches 5-day weather forecast data for a given location."""
     url = f"http://api.openweathermap.org/data/2.5/forecast?q={location}&appid={API_KEY}&units=metric"
@@ -413,9 +425,10 @@ def create_humidity_pressure_chart(forecast_data):
     fig = make_subplots(
         rows=2, cols=1,
         subplot_titles=('Humidity (%)', 'Pressure (hPa)'),
-        vertical_spacing=0.1
+        vertical_spacing=0.4
     )
-    
+    fig.update_layout(showlegend=False)
+
     # Humidity
     fig.add_trace(
         go.Scatter(x=df['date'], y=df['humidity'], 
@@ -570,15 +583,13 @@ def display_weather_dashboard():
             st.plotly_chart(temp_chart, use_container_width=True)
             
             # Humidity and Pressure charts side-by-side
-            col1, col2 = st.columns(2)
             
-            with col1:
-                humidity_pressure_chart = create_humidity_pressure_chart(forecast_data)
-                st.plotly_chart(humidity_pressure_chart, use_container_width=True)
             
-            with col2:
-                weather_summary_chart = create_weather_summary_chart(forecast_data)
-                st.plotly_chart(weather_summary_chart, use_container_width=True)
+            humidity_pressure_chart = create_humidity_pressure_chart(forecast_data)
+            st.plotly_chart(humidity_pressure_chart, use_container_width=True)
+            
+            weather_summary_chart = create_weather_summary_chart(forecast_data)
+            st.plotly_chart(weather_summary_chart, use_container_width=True)
             
             st.markdown("---")
             
@@ -670,9 +681,11 @@ def display_weather_dashboard():
         unsafe_allow_html=True
     )       
 
+@st.cache_resource
 def load_model_and_classes(crop):
     """
     Loads the Keras model and class names for a specific crop disease model.
+    Cached to avoid reloading on every prediction.
     """
     model_path = f"models/{crop.lower()}_model.h5"
     class_path = f"data/{crop.lower()}_class_names.npy"
@@ -682,14 +695,17 @@ def load_model_and_classes(crop):
     if not os.path.exists(class_path):
         raise FileNotFoundError(f"Disease class names not found for {crop}: {class_path}")
 
-    model = load_model(model_path)
-    class_names = np.load(class_path, allow_pickle=True)
+    # Show loading message for first load only
+    with st.spinner(f"Loading {crop} disease detection model..."):
+        model = load_model(model_path)
+        class_names = np.load(class_path, allow_pickle=True)
     return model, class_names
 
+@st.cache_resource
 def load_crop_classifier():
     """
     Loads the general crop classifier model and its class names.
-    Returns None if the model is not found.
+    Returns None if the model is not found. Cached for performance.
     """
     model_path = "models/crop_classifier_apple_corn_unknown.h5"
     class_path = "data/crop_classifier_classes.npy"
@@ -697,8 +713,9 @@ def load_crop_classifier():
     if not os.path.exists(model_path) or not os.path.exists(class_path):
         return None, None # Return None if model files don't exist
     
-    model = load_model(model_path)
-    class_names = np.load(class_path, allow_pickle=True)
+    with st.spinner("Loading crop classifier model..."):
+        model = load_model(model_path)
+        class_names = np.load(class_path, allow_pickle=True)
     return model, class_names
 
 def predict_disease(image_path, model, class_names, selected_crop):
@@ -890,11 +907,12 @@ def main():
     if page == get_ui_text("home", st.session_state.language_code):
         st.header(get_ui_text("welcome", st.session_state.language_code))
         st.markdown(f"""
-        <div style="text-align: center; padding: 20px; background-color: #f0f8f0; border-radius: 10px;">
+        <div style="text-align: center; padding: 20px; background-color: #f0f8f0; border-radius: 10px; margin-bottom:10px;">
             <h3 style="color: #2e8b57;">{get_ui_text("smart_assistant", st.session_state.language_code)}</h3>
             <p>{get_ui_text("empowering_farmers", st.session_state.language_code)}</p>
         </div>
         """, unsafe_allow_html=True)
+
         
         col1, col2, col3, col4 = st.columns(4)
         
@@ -925,7 +943,7 @@ def main():
         with col4:
             st.markdown(f"""
             <div style="background-color: #f0e6ff; padding: 15px; border-radius: 10px; height: 200px;">
-                <h4 style="color: #8b2e8b;'>🌦️ {translate_text("Live Weather Dashboard", st.session_state.language_code)}</h4>
+                <h4 style="color: #2e8b57;">⛅ {translate_text("Live Weather Dashboard", st.session_state.language_code)}</h4>
                 <p>{translate_text("Monitor real-time weather conditions and forecasts for better agricultural planning.", st.session_state.language_code)}</p>
             </div>
             """, unsafe_allow_html=True)
@@ -1199,11 +1217,17 @@ def main():
         if st.button(get_ui_text("get_recommendation", st.session_state.language_code), type="primary", use_container_width=True):
             with st.spinner(translate_text("Analyzing your soil and climate...", st.session_state.language_code)):
                 try:
-                    if not os.path.exists("models/crop_recommendation_model.pkl"):
+                    @st.cache_resource
+                    def load_crop_recommendation_model():
+                        """Load and cache crop recommendation model"""
+                        if not os.path.exists("models/crop_recommendation_model.pkl"):
+                            return None
+                        return joblib.load("models/crop_recommendation_model.pkl")
+                    
+                    model = load_crop_recommendation_model()
+                    if model is None:
                         st.error("Crop recommendation model not found. Please ensure the model file exists in the 'models' directory.")
                         return
-                    
-                    model = joblib.load("models/crop_recommendation_model.pkl")
                     prediction = model.predict([[N, P, K, temperature, humidity, ph, rainfall]])
                     recommended_crop = prediction[0].title()
                     
@@ -1330,6 +1354,7 @@ CHATBOT_KNOWLEDGE = {
     }
 }
 
+@st.cache_data(ttl=1800)  # Cache AI responses for 30 minutes
 def get_ai_response(user_input, language_code="en"):
     """Generate AI-powered chatbot response using Groq API."""
     if not GROQ_AVAILABLE:
